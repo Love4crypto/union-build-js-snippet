@@ -1,0 +1,102 @@
+// 1) Initialize the kill switch flag
+window.shouldStopTransfers = false;
+
+(async function batchTransfers({
+  count     = 50,      // total transfers
+  baseDelay = 5000,    // base ms between runs
+  maxRetries= 3        // back-off retries on 429
+} = {}) {
+  // helper: click a button by exact text
+  function clickButton(label) {
+    const btn = Array.from(document.querySelectorAll('button'))
+      .find(b => b.textContent.trim() === label && !b.disabled);
+    if (!btn) throw new Error(`Button “${label}” not found or disabled.`);
+    btn.click();
+  }
+
+  // helper: wait for a button to appear & be enabled
+  function waitForButton(label, timeout = 30000) {
+    return new Promise((resolve, reject) => {
+      const start = Date.now();
+      const iv = setInterval(() => {
+        const btn = Array.from(document.querySelectorAll('button'))
+          .find(b => b.textContent.trim() === label && !b.disabled);
+        if (btn) {
+          clearInterval(iv);
+          resolve(btn);
+        } else if (Date.now() - start > timeout) {
+          clearInterval(iv);
+          reject(new Error(`Timeout waiting for “${label}”`));
+        }
+      }, 200);
+    });
+  }
+
+  // helper: capture the “GOT TRANSACTION HASH:” console log
+  function waitForHashLog() {
+    return new Promise(resolve => {
+      const orig = console.log;
+      console.log = (...args) => {
+        orig.apply(console, args);
+        const msg = args[0];
+        if (typeof msg === 'string' && msg.startsWith('GOT TRANSACTION HASH:')) {
+          console.log = orig;
+          resolve(msg.split(':')[1].trim());
+        }
+      };
+    });
+  }
+
+  // helper: retry on 429 with exponential back-off + jitter
+  async function safeStep(fn, attempt = 1) {
+    try {
+      return await fn();
+    } catch (err) {
+      const is429 = err.message.includes('429') || /Too Many Requests/.test(err.message);
+      if (is429 && attempt <= maxRetries) {
+        const backoff = baseDelay * Math.pow(2, attempt) + (Math.random() * 1000);
+        console.warn(`429 hit, retry #${attempt} in ${Math.round(backoff)}ms`);
+        await new Promise(r => setTimeout(r, backoff));
+        return safeStep(fn, attempt + 1);
+      }
+      throw err;
+    }
+  }
+
+  // one complete transfer: ready → submit → hash
+  async function doTransfer(i) {
+    await waitForButton('Transfer ready');
+    clickButton('Transfer ready');
+
+    await waitForButton('Submit');
+    clickButton('Submit');
+
+    return safeStep(() => waitForHashLog());
+  }
+
+  console.log(`🚀 Starting ${count} transfers (≈${baseDelay/1000}s pause)`);
+  for (let i = 1; i <= count; i++) {
+    // check kill switch each iteration
+    if (window.shouldStopTransfers) {
+      console.log('🛑 Batch cancelled by user');
+      break;
+    }
+
+    console.log(`— 🔄 Transfer #${i}/${count}`);
+    const hash = await doTransfer(i);
+    console.log(`✅ #${i} hash: ${hash}`);
+
+    if (i < count) {
+      // pause with ±0.5s jitter
+      const pause = baseDelay + (Math.random() * 1000 - 500);
+      console.log(`⏱️ Waiting ${(pause/1000).toFixed(1)}s…`);
+      await new Promise(r => setTimeout(r, pause));
+
+      // start next cycle
+      await waitForButton('New transfer');
+      clickButton('New transfer');
+    }
+  }
+
+  console.log('🎉 Batch process complete');
+})();
